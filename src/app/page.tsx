@@ -134,15 +134,14 @@ const connectionCopy: Record<StreamState, string> = {
   closed: "Sin conexión - revisa el túnel",
 };
 
+type ConnectionStatus = "online" | "offline";
+
 const connectionBadge: Record<ConnectionStatus | StreamState, string> = {
   online: "text-emerald-50 border-emerald-100/30",
   offline: "text-rose-50 border-rose-100/30",
   connecting: "text-amber-50 border-amber-100/30",
   open: "text-emerald-50 border-emerald-100/30",
   closed: "text-rose-50 border-rose-100/30",
-  online: "text-emerald-50 border-emerald-100/30",
-  offline: "text-rose-50 border-rose-100/30",
-  connecting: "text-amber-50 border-amber-100/30",
 };
 
 const HISTORY_STORAGE_KEY = "yuyay.history";
