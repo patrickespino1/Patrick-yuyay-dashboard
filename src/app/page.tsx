@@ -1,11 +1,11 @@
 'use client';
 
-import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   InvestigationReportView,
   extractReportFromAgentPayload,
 } from "@/components/investigation-report-view";
+import type { InvestigationReport } from "@/components/investigation-report-view";
 import type { FormEvent } from "react";
 
 const baseFieldConfig = [
@@ -86,6 +86,15 @@ type ResultEntry = {
   sourceIp?: string | null;
 };
 
+interface InvestigationHistoryItem {
+  id: string;
+  subject: string;
+  createdAt: string;
+  source?: string;
+  summaryPreview: string;
+  fullReport: InvestigationReport;
+}
+
 const initialFormKeys = [
   ...baseFieldConfig.map((field) => field.key),
   ...socialFieldConfig.flatMap((field) => [field.urlKey, field.userKey]),
@@ -102,7 +111,7 @@ const defaultEntryWebhook =
 
 const statusStyles: Record<FormStatus, { label: string; chip: string }> = {
   idle: {
-    label: "Lista para despachar",
+    label: "Listo para investigar",
     chip: "text-slate-200 border-white/10",
   },
   sending: {
@@ -125,11 +134,16 @@ const connectionCopy: Record<StreamState, string> = {
   closed: "Sin conexión - revisa el túnel",
 };
 
-const connectionBadge: Record<StreamState, string> = {
-  connecting: "text-amber-50 border-amber-100/30",
-  open: "text-emerald-50 border-emerald-100/30",
-  closed: "text-rose-50 border-rose-100/30",
+type ConnectionStatus = "online" | "offline";
+
+const connectionBadge: Record<ConnectionStatus, string> = {
+  online: "text-emerald-50 border-emerald-100/30",
+  offline: "text-rose-50 border-rose-100/30",
 };
+
+const HISTORY_STORAGE_KEY = "yuyay.history";
+const MAX_HISTORY_ITEMS = 20;
+const SUMMARY_PREVIEW_LENGTH = 180;
 
 function sanitizeHandle(handle: string) {
   return handle.trim().replace(/^@/, "").replace(/\/+$/, "");
@@ -186,6 +200,16 @@ function extractSocialHandle(urlValue: string, platform: SocialFieldSpec["urlKey
   }
 }
 
+function buildSummaryPreview(report: InvestigationReport) {
+  const source =
+    report.narrative_summary ??
+    report.profile?.summary?.biography ??
+    report.recommended_strategy ??
+    "Sin resumen disponible";
+  if (source.length <= SUMMARY_PREVIEW_LENGTH) return source;
+  return `${source.slice(0, SUMMARY_PREVIEW_LENGTH).trim()}…`;
+}
+
 function stringifyPayload(payload: unknown) {
   try {
     return JSON.stringify(payload, null, 2);
@@ -207,7 +231,7 @@ const visibleFieldKeys = [
 export default function Home() {
   const [formData, setFormData] = useState<InvestigationForm>(initialForm);
   const [formStatus, setFormStatus] = useState<FormStatus>("idle");
-  const [statusMessage, setStatusMessage] = useState("Listo para despachar");
+  const [, setStatusMessage] = useState("Listo para investigar");
   const [results, setResults] = useState<ResultEntry[]>([]);
   const [streamState, setStreamState] = useState<StreamState>("connecting");
   const [callbackPreview, setCallbackPreview] = useState("http://localhost:3000/api/results");
@@ -217,6 +241,15 @@ export default function Home() {
   const [webhookDraft, setWebhookDraft] = useState(defaultEntryWebhook);
   const [viewMode, setViewMode] = useState<"form" | "results">("form");
   const [isWaitingResult, setIsWaitingResult] = useState(false);
+  const [isAdminMode, setIsAdminMode] = useState(false);
+  const [showAdminModal, setShowAdminModal] = useState(false);
+  const [adminPin, setAdminPin] = useState("");
+  const [adminPinError, setAdminPinError] = useState("");
+  const [history, setHistory] = useState<InvestigationHistoryItem[]>([]);
+  const [activeReport, setActiveReport] = useState<InvestigationReport | null>(null);
+  const [activeReportMeta, setActiveReportMeta] = useState<{ createdAt: string } | null>(
+    null
+  );
   const runTimestampRef = useRef<number | null>(null);
   const isFormMode = viewMode === "form";
 
@@ -228,6 +261,23 @@ export default function Home() {
         setEntryWebhook(storedWebhook);
         setWebhookDraft(storedWebhook);
       }
+      const adminStored = window.localStorage.getItem("yuyay.adminMode");
+      if (adminStored === "true") {
+        setIsAdminMode(true);
+      }
+      const storedHistory = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+      if (storedHistory) {
+        try {
+          const parsed = JSON.parse(storedHistory) as InvestigationHistoryItem[];
+          setHistory(parsed);
+          if (parsed.length > 0) {
+            setActiveReport(parsed[0].fullReport);
+            setActiveReportMeta({ createdAt: parsed[0].createdAt });
+          }
+        } catch {
+          // ignore corrupted localStorage
+        }
+      }
     }
   }, []);
 
@@ -235,7 +285,7 @@ export default function Home() {
     if (formStatus === "success" || formStatus === "error") {
       const timeout = setTimeout(() => {
         setFormStatus("idle");
-        setStatusMessage("Listo para despachar");
+        setStatusMessage("Listo para investigar");
       }, 3500);
       return () => clearTimeout(timeout);
     }
@@ -261,6 +311,26 @@ export default function Home() {
           }
           return [data, ...prev].slice(0, 12);
         });
+        const parsedReport = extractReportFromAgentPayload(data.payload);
+        if (parsedReport) {
+          const metadataSource = (
+            parsedReport.profile?.metadata as { data_source?: string } | undefined
+          )?.data_source;
+          const createdAt = data.receivedAt ?? new Date().toISOString();
+          const historyItem: InvestigationHistoryItem = {
+            id: data.id,
+            subject: parsedReport.profile?.subject ?? "Sujeto sin identificar",
+            createdAt,
+            source: parsedReport.profile?.data_source ?? metadataSource,
+            summaryPreview: buildSummaryPreview(parsedReport),
+            fullReport: parsedReport,
+          };
+          addHistoryEntry(historyItem);
+          setActiveReport(parsedReport);
+          setActiveReportMeta({ createdAt });
+          setViewMode("results");
+          setIsWaitingResult(false);
+        }
         if (runTimestampRef.current) {
           const receivedAt = new Date(data.receivedAt).getTime();
           if (receivedAt >= runTimestampRef.current) {
@@ -313,6 +383,72 @@ export default function Home() {
     setTimeout(() => setCopiedTarget(null), 1800);
   };
 
+  const connectionStatus: ConnectionStatus =
+    streamState === "open" ? "online" : "offline";
+  const latestEntry = results[0] ?? null;
+  const fallbackReport = latestEntry
+    ? extractReportFromAgentPayload(latestEntry.payload)
+    : null;
+  const currentReport = activeReport ?? fallbackReport;
+  const currentTimestamp =
+    activeReportMeta?.createdAt ?? latestEntry?.receivedAt ?? null;
+
+  const openAdminModal = () => {
+    setAdminPin("");
+    setAdminPinError("");
+    setShowAdminModal(true);
+  };
+
+  const closeAdminModal = () => {
+    setShowAdminModal(false);
+    setAdminPin("");
+    setAdminPinError("");
+  };
+
+  const handleAdminAccess = () => {
+    if (adminPin === "3333") {
+      setIsAdminMode(true);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("yuyay.adminMode", "true");
+      }
+      closeAdminModal();
+    } else {
+      setAdminPinError("PIN incorrecto");
+    }
+  };
+
+  const handleAdminDisable = () => {
+    setIsAdminMode(false);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem("yuyay.adminMode");
+    }
+    closeAdminModal();
+  };
+
+  const persistHistory = (items: InvestigationHistoryItem[]) => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(items));
+    }
+  };
+
+  const addHistoryEntry = (item: InvestigationHistoryItem) => {
+    setHistory((prev) => {
+      if (prev.some((entry) => entry.id === item.id)) {
+        return prev;
+      }
+      const next = [item, ...prev].slice(0, MAX_HISTORY_ITEMS);
+      persistHistory(next);
+      return next;
+    });
+  };
+
+  const handleHistorySelect = (item: InvestigationHistoryItem) => {
+    setActiveReport(item.fullReport);
+    setActiveReportMeta({ createdAt: item.createdAt });
+    setViewMode("results");
+    setIsWaitingResult(false);
+  };
+
   const startWebhookEdit = () => {
     setWebhookDraft(entryWebhook);
     setIsEditingWebhook(true);
@@ -337,7 +473,7 @@ export default function Home() {
     setFormData(initialForm);
     setViewMode("form");
     setFormStatus("idle");
-    setStatusMessage("Listo para despachar");
+    setStatusMessage("Listo para investigar");
     setIsWaitingResult(false);
     runTimestampRef.current = null;
   };
@@ -378,18 +514,22 @@ export default function Home() {
     }
   };
 
-  const ResultsPanel = ({ fullWidth = false }: { fullWidth?: boolean }) => {
+  const ResultsPanel = ({
+    fullWidth = false,
+    report,
+    timestamp,
+  }: {
+    fullWidth?: boolean;
+    report: InvestigationReport | null;
+    timestamp?: string | null;
+  }) => {
     const containerClass = [
       "glass-panel rounded-3xl border border-white/10 p-6 sm:p-7",
       fullWidth ? "w-full lg:mt-2" : "",
     ]
       .filter(Boolean)
       .join(" ");
-    const latestEntry = results[0] ?? null;
     const showLoader = viewMode === "results" && isWaitingResult;
-    const parsedReport = latestEntry
-      ? extractReportFromAgentPayload(latestEntry.payload)
-      : null;
 
     return (
       <section className={containerClass}>
@@ -410,23 +550,15 @@ export default function Home() {
               <span className="h-12 w-12 animate-spin rounded-full border-2 border-white/15 border-t-[var(--brand-cyan)]" />
               <p>Procesando investigación…</p>
             </div>
-          ) : parsedReport ? (
+          ) : report ? (
             <div className="space-y-6">
-              <div className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-400">
-                Última actualización —{" "}
-                {dateFormatter.format(new Date(latestEntry!.receivedAt))}
-              </div>
-              <InvestigationReportView report={parsedReport} />
-            </div>
-          ) : latestEntry ? (
-            <div className="flex flex-col gap-3">
-              <div className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-400">
-                Última actualización —{" "}
-                {dateFormatter.format(new Date(latestEntry.receivedAt))}
-              </div>
-              <pre className="code-block rounded-2xl bg-black/30 p-4 text-[0.82rem] leading-relaxed text-slate-100 whitespace-pre-wrap break-words">
-                {stringifyPayload(latestEntry.payload)}
-              </pre>
+              {timestamp && (
+                <div className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-400">
+                  Última actualización —{" "}
+                  {dateFormatter.format(new Date(timestamp))}
+                </div>
+              )}
+              <InvestigationReportView report={report} />
             </div>
           ) : (
             <div className="flex h-60 flex-col items-center justify-center gap-3 text-center text-sm text-slate-400">
@@ -453,6 +585,7 @@ export default function Home() {
   };
 
   return (
+    <>
     <div className="relative overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(45,224,203,0.22),_transparent_45%)]">
       <div className="pointer-events-none absolute inset-0 opacity-30" aria-hidden>
         <div className="absolute -top-32 left-12 h-72 w-72 rounded-full bg-[radial-gradient(circle,_rgba(45,224,203,0.35),_transparent_60%)] blur-2xl" />
@@ -463,15 +596,11 @@ export default function Home() {
         <header className="glass-panel w-full rounded-3xl border border-white/10 px-6 py-8 shadow-[0_20px_60px_rgba(5,13,30,0.45)] sm:px-8 lg:px-12">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:gap-10">
             <div className="flex flex-1 flex-col items-center gap-4 text-center lg:flex-row lg:items-center lg:gap-5 lg:text-left">
-              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/5 p-2 shadow-inner shadow-[inset_0_0_15px_rgba(255,255,255,0.08)]">
-                <Image
-                  src="/yuyay-logo.svg"
-                  alt="Logotipo de Yuyay"
-                  width={56}
-                  height={56}
-                  priority
-                />
-              </div>
+              <img
+                src="/logo-yuyay.png"
+                alt="Yuyay Logo"
+                className="h-14 w-auto object-contain transition-opacity duration-300"
+              />
               <div className="flex flex-1 flex-col gap-2">
                 <p className="text-xs uppercase tracking-[0.4em] text-[var(--brand-cyan)] sm:text-[0.7rem]">
                   Yuyay // Inteligencia aplicada
@@ -487,21 +616,45 @@ export default function Home() {
                   Panel interno
                 </p>
                 <p className="text-base font-semibold text-white/90">
-                  Estado: {connectionCopy[streamState]}
+                  {connectionStatus === "online"
+                    ? "Listo para investigar"
+                    : "Conéctalo para investigar"}
                 </p>
               </div>
               <span
-                className={`inline-flex items-center justify-center rounded-full border bg-white/5 px-2.5 py-1 text-[0.55rem] font-semibold uppercase tracking-[0.35em] sm:mt-[1px] ${connectionBadge[streamState]}`}
+                className={`inline-flex items-center justify-center rounded-full border bg-white/5 px-2.5 py-1 text-[0.55rem] font-semibold uppercase tracking-[0.35em] sm:mt-[1px] ${connectionBadge[connectionStatus]}`}
               >
-                {streamState === "open" ? "Escuchando" : "Sin conexión"}
+                {connectionStatus === "online" ? "ONLINE" : "OFFLINE"}
               </span>
+              <button
+                type="button"
+                onClick={openAdminModal}
+                aria-label="Abrir configuración"
+                className="rounded-full p-1"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  className="h-5 w-5 text-slate-400 transition hover:text-white"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.89 3.31.877 2.42 2.42a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.89 1.543-.877 3.31-2.42 2.42a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.89-3.31-.877-2.42-2.42a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.89-1.543.877-3.31 2.42-2.42.943.544 2.14.136 2.573-1.065z"
+                  />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
             </div>
           </div>
         </header>
 
         <div className="flex w-full flex-col gap-10 lg:px-4">
           {isFormMode ? (
-            <div className="grid gap-8 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
+            <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
               <section className="glass-panel rounded-3xl border border-white/8 p-6 sm:p-8 lg:mt-2">
               <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
                 <div>
@@ -589,9 +742,6 @@ export default function Home() {
                   >
                     {statusStyles[formStatus].label}
                   </span>
-                  <span className="text-sm text-slate-300">
-                    {statusMessage}
-                  </span>
                 </div>
                 <button
                   type="submit"
@@ -600,21 +750,88 @@ export default function Home() {
                 >
                   {formStatus === "sending"
                     ? "Enviando solicitud…"
-                    : "Enviar al webhook"}
+                    : "Iniciar"}
                 </button>
               </div>
             </form>
-          </section>
-              <ResultsPanel />
+            </section>
+              <div className="glass-panel rounded-3xl border border-white/10 p-6 sm:p-7">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.35em] text-[var(--brand-cyan)]">
+                      Historial
+                    </p>
+                    <h3 className="text-2xl font-semibold text-white">
+                      Investigaciones
+                    </h3>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    {history.length} evento(s)
+                  </p>
+                </div>
+                {history.length === 0 ? (
+                  <div className="mt-6 rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
+                    Aún no hay investigaciones guardadas. Ejecuta una
+                    investigación para ver el historial aquí.
+                  </div>
+                ) : (
+                  <div className="mt-6 flex max-h-[26rem] flex-col divide-y divide-white/10 overflow-auto pr-1">
+                    {history.map((item) => (
+                      <div key={item.id} className="py-4 first:pt-0 last:pb-0">
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                          <div className="flex-1">
+                            <p className="text-base font-semibold text-white">
+                              {item.subject}
+                            </p>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                              <span>
+                                {dateFormatter.format(new Date(item.createdAt))}
+                              </span>
+                              {item.source && (
+                                <span className="rounded-full border border-white/10 px-2 py-0.5 text-[0.65rem] uppercase tracking-[0.3em] text-white/70">
+                                  {item.source}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleHistorySelect(item)}
+                            className="inline-flex items-center gap-1 text-sm font-semibold text-[var(--brand-cyan)] transition hover:text-white"
+                          >
+                            Ver informe <span aria-hidden>→</span>
+                          </button>
+                        </div>
+                        <p
+                          className="mt-2 text-sm text-slate-300"
+                          style={{
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                          }}
+                        >
+                          {item.summaryPreview}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           ) : (
             <div className="flex flex-col gap-6">
-              <ResultsPanel fullWidth />
+              <ResultsPanel
+                fullWidth
+                report={currentReport}
+                timestamp={currentTimestamp}
+              />
             </div>
           )}
 
           <div className="grid gap-6 lg:grid-cols-2">
-            <div className="glass-panel rounded-3xl border border-white/10 p-6 sm:p-7">
+            {isAdminMode && (
+              <div className="glass-panel rounded-3xl border border-white/10 p-6 sm:p-7">
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between">
                   <p className="text-base font-semibold text-white">
@@ -708,57 +925,64 @@ export default function Home() {
                 </div>
               </div>
             </div>
-            <div className="glass-panel rounded-3xl border border-white/10 p-6 sm:p-7">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.35em] text-[var(--brand-cyan)]">
-                    Flujo inverso
-                  </p>
-                  <h3 className="text-2xl font-semibold text-white">
-                    Resultados recibidos
-                  </h3>
-                </div>
-                <p className="text-xs text-slate-400">
-                  {results.length} evento(s)
-                </p>
-              </div>
-              {results.length === 0 ? (
-                <div className="mt-6 rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
-                  Aún no se han recibido informes. Conecta el webhook de salida
-                  para ver las respuestas aquí.
-                </div>
-              ) : (
-                <div className="mt-6 flex max-h-[26rem] flex-col gap-4 overflow-auto pr-1">
-                  {results.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className="rounded-2xl border border-white/12 bg-white/5 p-4"
-                    >
-                      <div className="flex flex-wrap items-center gap-2 text-[0.65rem] uppercase tracking-[0.3em] text-slate-400">
-                        <span className="font-semibold text-white/80">
-                          {dateFormatter.format(new Date(entry.receivedAt))}
-                        </span>
-                        <span className="text-slate-700">/</span>
-                        <span>ID {entry.id}</span>
-                        {entry.sourceIp && (
-                          <>
-                            <span className="text-slate-700">/</span>
-                            <span>IP {entry.sourceIp}</span>
-                          </>
-                        )}
-                      </div>
-                      <pre className="code-block mt-3 max-h-48 overflow-auto rounded-2xl bg-black/20 p-3 text-[0.7rem] text-slate-100 whitespace-pre-wrap break-words">
-                        {stringifyPayload(entry.payload)}
-                      </pre>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            )}
           </div>
         </div>
       </div>
     </div>
+      {showAdminModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-[#050505] p-6 shadow-[0_20px_60px_rgba(0,0,0,0.7)]">
+            <p className="text-xs uppercase tracking-[0.4em] text-[var(--brand-cyan)]">
+              Modo administrador
+            </p>
+            <h3 className="mt-2 text-2xl font-semibold text-white">Introduce el PIN</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Solo los administradores pueden configurar los webhooks.
+            </p>
+            <input
+              type="password"
+              value={adminPin}
+              onChange={(event) => {
+                setAdminPin(event.target.value);
+                if (adminPinError) setAdminPinError("");
+              }}
+              className="mt-4 w-full rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-base text-white placeholder:text-slate-500 focus:border-[var(--brand-cyan)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-cyan)]/30"
+              placeholder="••••"
+              autoFocus
+            />
+            {adminPinError && (
+              <p className="mt-2 text-sm text-rose-300">{adminPinError}</p>
+            )}
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              {isAdminMode && (
+                <button
+                  type="button"
+                  onClick={handleAdminDisable}
+                  className="rounded-2xl border border-white/10 px-4 py-2 text-sm font-semibold text-white/80 transition hover:bg-white/5"
+                >
+                  Desactivar
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={closeAdminModal}
+                className="rounded-2xl border border-white/15 px-4 py-2 text-sm font-semibold text-white/70 transition hover:bg-white/5"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleAdminAccess}
+                className="rounded-2xl bg-gradient-to-r from-[var(--brand-cyan)] to-[var(--brand-indigo)] px-4 py-2 text-sm font-semibold text-slate-950"
+              >
+                Acceder
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
   const applySocialExtraction = (current: InvestigationForm) => {
