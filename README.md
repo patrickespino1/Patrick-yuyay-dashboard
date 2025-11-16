@@ -68,3 +68,20 @@ La app queda en `http://localhost:3000`. El servidor guarda los eventos SSE en m
 ---
 
 Mantén abierta la sección de resultados para monitorear el SSE; si necesitas resetear la UI, usa el botón “Nueva investigación” cuando el reporte ya esté renderizado. Para integrar nuevos campos del agente, amplía `InvestigationReport` y añade tarjetas en `InvestigationReportView`.
+
+## Requisitos
+
+- Node.js 18.18+ (recomendado 20.x)
+- npm (viene con Node)
+
+## Exponer el webhook de resultados
+
+1. Abre un túnel (`ngrok http 3000` u otra herramienta) para obtener una URL pública.
+2. Configura `PUBLIC_APP_BASE_URL` con esa URL (ej. `https://mi-tunel.ngrok.io`).
+3. En tu flujo n8n/IA, envía la respuesta del agente a `POST {PUBLIC_APP_BASE_URL}/api/results` y, si usas token, añade `x-webhook-secret: $RESULT_WEBHOOK_TOKEN`.
+
+El panel usa SSE (`/api/results/stream`) para mostrar la información en vivo.
+
+## Producción
+
+Funciona en cualquier hosting con soporte para Next.js 16 (Vercel, AWS, etc.). Solo asegúrate de definir las mismas variables de entorno y permitir que n8n alcance `/api/results`.
