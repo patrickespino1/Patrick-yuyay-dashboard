@@ -8,7 +8,11 @@ function extractIp(request: NextRequest) {
   if (forwardedFor) {
     return forwardedFor.split(",")[0]?.trim();
   }
-  return request.ip ?? null;
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) {
+    return realIp;
+  }
+  return (request as NextRequest & { ip?: string }).ip ?? null;
 }
 
 export async function POST(request: NextRequest) {
