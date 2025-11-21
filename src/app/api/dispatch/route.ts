@@ -13,6 +13,7 @@ export async function POST(request: NextRequest) {
   const payload = (await request.json()) as {
     form: Record<string, string>;
     entryWebhook?: string;
+    callbackUrl?: string;
   };
 
   if (!payload?.form) {
@@ -28,6 +29,11 @@ export async function POST(request: NextRequest) {
       ? payload.entryWebhook.trim()
       : DEFAULT_N8N_WEBHOOK_URL;
 
+  const callbackOverride =
+    typeof payload.callbackUrl === "string" && payload.callbackUrl.trim().length > 0
+      ? payload.callbackUrl.trim()
+      : null;
+
   if (!entryWebhook) {
     return NextResponse.json(
       { error: "No hay webhook de entrada configurado" },
@@ -39,9 +45,11 @@ export async function POST(request: NextRequest) {
     request.headers.get("origin") ??
     request.headers.get("referer") ??
     request.headers.get("x-forwarded-host");
-  const callbackUrl = origin
-    ? new URL("/api/results", origin.startsWith("http") ? origin : `https://${origin}`).toString()
-    : RESULTS_CALLBACK_FALLBACK;
+  const callbackUrl =
+    callbackOverride ??
+    (origin
+      ? new URL("/api/results", origin.startsWith("http") ? origin : `https://${origin}`).toString()
+      : RESULTS_CALLBACK_FALLBACK);
 
   const proxyBody = {
     request: [payload.form],

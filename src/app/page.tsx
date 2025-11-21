@@ -147,6 +147,7 @@ const connectionBadge: Record<ConnectionStatus | StreamState, string> = {
 };
 
 const HISTORY_STORAGE_KEY = "yuyay.history";
+const CALLBACK_STORAGE_KEY = "yuyay.callbackUrl";
 const MAX_HISTORY_ITEMS = 20;
 const SUMMARY_PREVIEW_LENGTH = 180;
 
@@ -230,11 +231,13 @@ export default function Home() {
   const [formStatus, setFormStatus] = useState<FormStatus>("idle");
   const [, setStatusMessage] = useState("Listo para investigar");
   const [streamState, setStreamState] = useState<StreamState>("connecting");
-  const [callbackPreview, setCallbackPreview] = useState(defaultCallbackUrl);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const [entryWebhook, setEntryWebhook] = useState(defaultEntryWebhook);
   const [isEditingWebhook, setIsEditingWebhook] = useState(false);
   const [webhookDraft, setWebhookDraft] = useState(defaultEntryWebhook);
+  const [callbackUrl, setCallbackUrl] = useState(defaultCallbackUrl);
+  const [isEditingCallback, setIsEditingCallback] = useState(false);
+  const [callbackDraft, setCallbackDraft] = useState(defaultCallbackUrl);
   const [viewMode, setViewMode] = useState<"form" | "results">("form");
   const [isAdminMode, setIsAdminMode] = useState(false);
   const [showAdminModal, setShowAdminModal] = useState(false);
@@ -264,13 +267,23 @@ export default function Home() {
   }, [persistHistory]);
 
   useEffect(() => {
-    setCallbackPreview(`${window.location.origin}/api/results`);
     if (typeof window !== "undefined") {
+      const inferredCallback = `${window.location.origin}/api/results`;
+      setCallbackUrl((prev) => (prev === defaultCallbackUrl ? inferredCallback : prev));
+      setCallbackDraft((prev) => (prev === defaultCallbackUrl ? inferredCallback : prev));
+
       const storedWebhook = window.localStorage.getItem("yuyay.entryWebhook");
       if (storedWebhook) {
         setEntryWebhook(storedWebhook);
         setWebhookDraft(storedWebhook);
       }
+
+      const storedCallback = window.localStorage.getItem(CALLBACK_STORAGE_KEY);
+      if (storedCallback) {
+        setCallbackUrl(storedCallback);
+        setCallbackDraft(storedCallback);
+      }
+
       const adminStored = window.localStorage.getItem("yuyay.adminMode");
       if (adminStored === "true") {
         setIsAdminMode(true);
@@ -423,7 +436,7 @@ export default function Home() {
   const connectionStatus: ConnectionStatus =
     streamState === "open" ? "online" : "offline";
   const displayedEntryWebhook = briefing?.meta?.sourceWebhookUrl ?? entryWebhook;
-  const displayedCallbackUrl = briefing?.callbackUrl ?? callbackPreview;
+  const displayedCallbackUrl = briefing?.callbackUrl ?? callbackUrl;
 
   const openAdminModal = () => {
     setAdminPin("");
@@ -483,6 +496,26 @@ export default function Home() {
     setIsEditingWebhook(false);
   };
 
+  const startCallbackEdit = () => {
+    setCallbackDraft(callbackUrl);
+    setIsEditingCallback(true);
+  };
+
+  const cancelCallbackEdit = () => {
+    setCallbackDraft(callbackUrl);
+    setIsEditingCallback(false);
+  };
+
+  const saveCallbackEdit = () => {
+    const sanitized = callbackDraft.trim();
+    if (!sanitized) return;
+    setCallbackUrl(sanitized);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(CALLBACK_STORAGE_KEY, sanitized);
+    }
+    setIsEditingCallback(false);
+  };
+
   const handleStartNewInvestigation = () => {
     setFormData(initialForm);
     setViewMode("form");
@@ -510,7 +543,7 @@ export default function Home() {
       const response = await fetch("/api/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ form: preparedForm, entryWebhook }),
+        body: JSON.stringify({ form: preparedForm, entryWebhook, callbackUrl }),
       });
 
       const body = await response.json();
@@ -895,19 +928,61 @@ export default function Home() {
                   )}
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <div className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-400">
-                    Salida (callback de esta UI)
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-400">
+                      Salida (callback de esta UI)
+                    </div>
+                    {!isEditingCallback && (
+                      <button
+                        type="button"
+                        onClick={startCallbackEdit}
+                        className="text-xs font-semibold text-[var(--brand-cyan)] hover:text-white transition"
+                      >
+                        Editar
+                      </button>
+                    )}
                   </div>
-                  <p className="mt-2 break-all font-mono text-xs text-white/80">
-                    {displayedCallbackUrl}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => copyToClipboard(displayedCallbackUrl, "salida")}
-                    className="mt-3 text-xs font-semibold text-[var(--brand-cyan)]"
-                  >
-                    {copiedTarget === "salida" ? "Copiado" : "Copiar URL"}
-                  </button>
+                  {isEditingCallback ? (
+                    <>
+                      <input
+                        type="url"
+                        value={callbackDraft}
+                        onChange={(event) => setCallbackDraft(event.target.value)}
+                        className="mt-3 w-full rounded-2xl border border-white/15 bg-black/20 px-4 py-3 text-xs text-white placeholder:text-slate-500 focus:border-[var(--brand-cyan)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-cyan)]/40"
+                        placeholder="https://tu-callback..."
+                      />
+                      <div className="mt-3 flex flex-wrap gap-3">
+                        <button
+                          type="button"
+                          onClick={saveCallbackEdit}
+                          disabled={!callbackDraft.trim()}
+                          className="rounded-2xl bg-gradient-to-r from-[var(--brand-cyan)] to-[var(--brand-indigo)] px-4 py-2 text-xs font-semibold text-slate-950 transition disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Guardar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelCallbackEdit}
+                          className="rounded-2xl border border-white/15 px-4 py-2 text-xs font-semibold text-white/80 transition hover:bg-white/5"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mt-2 break-all font-mono text-xs text-white/80">
+                        {displayedCallbackUrl}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(displayedCallbackUrl, "salida")}
+                        className="mt-3 text-xs font-semibold text-[var(--brand-cyan)]"
+                      >
+                        {copiedTarget === "salida" ? "Copiado" : "Copiar URL"}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
