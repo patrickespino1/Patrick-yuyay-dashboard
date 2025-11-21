@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { addResult, getResults } from "@/lib/result-store";
 import { normalizeWebhookPayload } from "@/utils/parseBriefing";
 
+export const runtime = "nodejs";
+
 const RESULT_WEBHOOK_TOKEN = process.env.RESULT_WEBHOOK_TOKEN;
 
 function extractIp(request: NextRequest) {
