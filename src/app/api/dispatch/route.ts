@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const INPUT_WEBHOOK_URL = process.env.INPUT_WEBHOOK_URL;
-const PUBLIC_APP_BASE_URL = process.env.PUBLIC_APP_BASE_URL;
+const DEFAULT_N8N_WEBHOOK_URL =
+  process.env.N8N_WEBHOOK_URL ??
+  process.env.NEXT_PUBLIC_N8N_WEBHOOK_URL ??
+  "https://dria02.app.n8n.cloud/webhook/c2ad2cd4-a402-47af-a955-d5ca8551381f";
+
+const RESULTS_CALLBACK_FALLBACK =
+  process.env.NEXT_PUBLIC_RESULTS_CALLBACK_URL ??
+  "https://yuyay-investigacion-politica.vercel.app/api/results";
 
 export async function POST(request: NextRequest) {
   const payload = (await request.json()) as {
@@ -16,17 +22,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const origin = request.headers.get("origin");
-  const callbackBase = PUBLIC_APP_BASE_URL ?? origin;
-  const callbackUrl = callbackBase
-    ? new URL("/api/results", callbackBase).toString()
-    : null;
-
   const entryWebhook =
     typeof payload.entryWebhook === "string" &&
     payload.entryWebhook.trim().length > 0
       ? payload.entryWebhook.trim()
-      : INPUT_WEBHOOK_URL;
+      : DEFAULT_N8N_WEBHOOK_URL;
 
   if (!entryWebhook) {
     return NextResponse.json(
@@ -34,6 +34,14 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+
+  const origin =
+    request.headers.get("origin") ??
+    request.headers.get("referer") ??
+    request.headers.get("x-forwarded-host");
+  const callbackUrl = origin
+    ? new URL("/api/results", origin.startsWith("http") ? origin : `https://${origin}`).toString()
+    : RESULTS_CALLBACK_FALLBACK;
 
   const proxyBody = {
     request: [payload.form],

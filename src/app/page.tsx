@@ -1,12 +1,16 @@
 'use client';
+/* eslint-disable @next/next/no-img-element */
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  InvestigationReportView,
-  extractReportFromAgentPayload,
-} from "@/components/investigation-report-view";
-import type { InvestigationReport } from "@/components/investigation-report-view";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { InvestigationLoading } from "@/components/InvestigationLoading";
+import { BriefingResults } from "@/components/BriefingResults";
+import {
+  normalizeWebhookPayload,
+  type BriefingPayload,
+  type AgentBriefing,
+  extractPrimarySubject,
+} from "@/utils/parseBriefing";
 
 const baseFieldConfig = [
   {
@@ -92,7 +96,7 @@ interface InvestigationHistoryItem {
   createdAt: string;
   source?: string;
   summaryPreview: string;
-  fullReport: InvestigationReport;
+  fullReport: AgentBriefing;
 }
 
 const initialFormKeys = [
@@ -106,8 +110,12 @@ const initialForm = initialFormKeys.reduce<InvestigationForm>((acc, key) => {
 }, {} as InvestigationForm);
 
 const defaultEntryWebhook =
-  process.env.NEXT_PUBLIC_ENTRY_WEBHOOK ??
-  "https://dr.ia.ngrok-free.dev/webhook-test/c2ad2cd4-a402-47af-a955-d5ca8551381f";
+  process.env.NEXT_PUBLIC_N8N_WEBHOOK_URL ??
+  "https://dria02.app.n8n.cloud/webhook/c2ad2cd4-a402-47af-a955-d5ca8551381f";
+
+const defaultCallbackUrl =
+  process.env.NEXT_PUBLIC_RESULTS_CALLBACK_URL ??
+  "https://yuyay-investigacion-politica.vercel.app/api/results";
 
 const statusStyles: Record<FormStatus, { label: string; chip: string }> = {
   idle: {
@@ -126,12 +134,6 @@ const statusStyles: Record<FormStatus, { label: string; chip: string }> = {
     label: "Intento fallido",
     chip: "text-rose-200 border-rose-400/40",
   },
-};
-
-const connectionCopy: Record<StreamState, string> = {
-  connecting: "Escuchando canal seguro…",
-  open: "Escuchando eventos entrantes",
-  closed: "Sin conexión - revisa el túnel",
 };
 
 type ConnectionStatus = "online" | "offline";
@@ -203,7 +205,7 @@ function extractSocialHandle(urlValue: string, platform: SocialFieldSpec["urlKey
   }
 }
 
-function buildSummaryPreview(report: InvestigationReport) {
+function buildSummaryPreview(report: BriefingPayload) {
   const source =
     report.narrative_summary ??
     report.profile?.summary?.biography ??
@@ -211,14 +213,6 @@ function buildSummaryPreview(report: InvestigationReport) {
     "Sin resumen disponible";
   if (source.length <= SUMMARY_PREVIEW_LENGTH) return source;
   return `${source.slice(0, SUMMARY_PREVIEW_LENGTH).trim()}…`;
-}
-
-function stringifyPayload(payload: unknown) {
-  try {
-    return JSON.stringify(payload, null, 2);
-  } catch {
-    return String(payload);
-  }
 }
 
 const dateFormatter = new Intl.DateTimeFormat("es-ES", {
@@ -235,26 +229,39 @@ export default function Home() {
   const [formData, setFormData] = useState<InvestigationForm>(initialForm);
   const [formStatus, setFormStatus] = useState<FormStatus>("idle");
   const [, setStatusMessage] = useState("Listo para investigar");
-  const [results, setResults] = useState<ResultEntry[]>([]);
   const [streamState, setStreamState] = useState<StreamState>("connecting");
-  const [callbackPreview, setCallbackPreview] = useState("http://localhost:3000/api/results");
+  const [callbackPreview, setCallbackPreview] = useState(defaultCallbackUrl);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const [entryWebhook, setEntryWebhook] = useState(defaultEntryWebhook);
   const [isEditingWebhook, setIsEditingWebhook] = useState(false);
   const [webhookDraft, setWebhookDraft] = useState(defaultEntryWebhook);
   const [viewMode, setViewMode] = useState<"form" | "results">("form");
-  const [isWaitingResult, setIsWaitingResult] = useState(false);
   const [isAdminMode, setIsAdminMode] = useState(false);
   const [showAdminModal, setShowAdminModal] = useState(false);
   const [adminPin, setAdminPin] = useState("");
   const [adminPinError, setAdminPinError] = useState("");
   const [history, setHistory] = useState<InvestigationHistoryItem[]>([]);
-  const [activeReport, setActiveReport] = useState<InvestigationReport | null>(null);
-  const [activeReportMeta, setActiveReportMeta] = useState<{ createdAt: string } | null>(
-    null
-  );
+  const [briefing, setBriefing] = useState<AgentBriefing | null>(null);
+  const [isLoadingResult, setIsLoadingResult] = useState(false);
   const runTimestampRef = useRef<number | null>(null);
   const isFormMode = viewMode === "form";
+
+  const persistHistory = useCallback((items: InvestigationHistoryItem[]) => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(items));
+    }
+  }, []);
+
+  const addHistoryEntry = useCallback((item: InvestigationHistoryItem) => {
+    setHistory((prev) => {
+      if (prev.some((entry) => entry.id === item.id)) {
+        return prev;
+      }
+      const next = [item, ...prev].slice(0, MAX_HISTORY_ITEMS);
+      persistHistory(next);
+      return next;
+    });
+  }, [persistHistory]);
 
   useEffect(() => {
     setCallbackPreview(`${window.location.origin}/api/results`);
@@ -272,10 +279,20 @@ export default function Home() {
       if (storedHistory) {
         try {
           const parsed = JSON.parse(storedHistory) as InvestigationHistoryItem[];
-          setHistory(parsed);
-          if (parsed.length > 0) {
-            setActiveReport(parsed[0].fullReport);
-            setActiveReportMeta({ createdAt: parsed[0].createdAt });
+          const upgraded: InvestigationHistoryItem[] = parsed
+            .filter(Boolean)
+            .map((item) => {
+              const reportCandidate = (item.fullReport as AgentBriefing)?.payload
+                ? (item.fullReport as AgentBriefing)
+                : ({ payload: item.fullReport as unknown as BriefingPayload } as AgentBriefing);
+              return {
+                ...item,
+                fullReport: reportCandidate,
+              };
+            });
+          setHistory(upgraded);
+          if (upgraded.length > 0 && upgraded[0].fullReport) {
+            setBriefing(upgraded[0].fullReport);
           }
         } catch {
           // ignore corrupted localStorage
@@ -306,38 +323,55 @@ export default function Home() {
 
     eventSource.onmessage = (event) => {
       try {
-        const data: ResultEntry = JSON.parse(event.data);
-        if (!data?.id) return;
-        setResults((prev) => {
-          if (prev.some((entry) => entry.id === data.id)) {
-            return prev;
-          }
-          return [data, ...prev].slice(0, 12);
-        });
-        const parsedReport = extractReportFromAgentPayload(data.payload);
-        if (parsedReport) {
-          const metadataSource = (
-            parsedReport.profile?.metadata as { data_source?: string } | undefined
-          )?.data_source;
-          const createdAt = data.receivedAt ?? new Date().toISOString();
-          const historyItem: InvestigationHistoryItem = {
-            id: data.id,
-            subject: parsedReport.profile?.subject ?? "Sujeto sin identificar",
-            createdAt,
-            source: parsedReport.profile?.data_source ?? metadataSource,
-            summaryPreview: buildSummaryPreview(parsedReport),
-            fullReport: parsedReport,
-          };
-          addHistoryEntry(historyItem);
-          setActiveReport(parsedReport);
-          setActiveReportMeta({ createdAt });
-          setViewMode("results");
-          setIsWaitingResult(false);
-        }
-        if (runTimestampRef.current) {
-          const receivedAt = new Date(data.receivedAt).getTime();
+        const raw = JSON.parse(event.data) as ResultEntry | unknown;
+        const normalizedReport = normalizeWebhookPayload(
+          Array.isArray(raw) ? raw : (raw as ResultEntry)?.payload ?? raw
+        );
+
+        if (!normalizedReport) return;
+
+        const entryMeta =
+          raw && typeof raw === "object" && !Array.isArray(raw) && "id" in (raw as ResultEntry)
+            ? (raw as ResultEntry)
+            : undefined;
+
+        const historyId =
+          (entryMeta?.id ??
+            normalizedReport.meta?.requestedAt ??
+            globalThis.crypto?.randomUUID?.() ??
+            `${Date.now()}`);
+
+        const createdAt =
+          normalizedReport.meta?.requestedAt ??
+          entryMeta?.receivedAt ??
+          new Date().toISOString();
+
+        const subject =
+          extractPrimarySubject(normalizedReport.payload) ?? "Sujeto sin identificar";
+
+        const metadataSource =
+          normalizedReport.meta?.sourceWebhookUrl ??
+          normalizedReport.payload.profile?.metadata?.data_source ??
+          normalizedReport.payload.profile?.metadata?.country;
+
+        const historyItem: InvestigationHistoryItem = {
+          id: historyId,
+          subject,
+          createdAt,
+          source: metadataSource,
+          summaryPreview: buildSummaryPreview(normalizedReport.payload),
+          fullReport: normalizedReport,
+        };
+
+        addHistoryEntry(historyItem);
+        setBriefing(normalizedReport);
+        setIsLoadingResult(false);
+        setViewMode("results");
+
+        if (runTimestampRef.current && createdAt) {
+          const receivedAt = new Date(createdAt).getTime();
           if (receivedAt >= runTimestampRef.current) {
-            setIsWaitingResult(false);
+            setIsLoadingResult(false);
           }
         }
       } catch (error) {
@@ -348,7 +382,7 @@ export default function Home() {
     return () => {
       eventSource.close();
     };
-  }, []);
+  }, [addHistoryEntry]);
 
   const completion = useMemo(() => {
     const filled = visibleFieldKeys.filter(
@@ -388,13 +422,8 @@ export default function Home() {
 
   const connectionStatus: ConnectionStatus =
     streamState === "open" ? "online" : "offline";
-  const latestEntry = results[0] ?? null;
-  const fallbackReport = latestEntry
-    ? extractReportFromAgentPayload(latestEntry.payload)
-    : null;
-  const currentReport = activeReport ?? fallbackReport;
-  const currentTimestamp =
-    activeReportMeta?.createdAt ?? latestEntry?.receivedAt ?? null;
+  const displayedEntryWebhook = briefing?.meta?.sourceWebhookUrl ?? entryWebhook;
+  const displayedCallbackUrl = briefing?.callbackUrl ?? callbackPreview;
 
   const openAdminModal = () => {
     setAdminPin("");
@@ -428,28 +457,10 @@ export default function Home() {
     closeAdminModal();
   };
 
-  const persistHistory = (items: InvestigationHistoryItem[]) => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(items));
-    }
-  };
-
-  const addHistoryEntry = (item: InvestigationHistoryItem) => {
-    setHistory((prev) => {
-      if (prev.some((entry) => entry.id === item.id)) {
-        return prev;
-      }
-      const next = [item, ...prev].slice(0, MAX_HISTORY_ITEMS);
-      persistHistory(next);
-      return next;
-    });
-  };
-
   const handleHistorySelect = (item: InvestigationHistoryItem) => {
-    setActiveReport(item.fullReport);
-    setActiveReportMeta({ createdAt: item.createdAt });
+    setBriefing(item.fullReport);
+    setIsLoadingResult(false);
     setViewMode("results");
-    setIsWaitingResult(false);
   };
 
   const startWebhookEdit = () => {
@@ -477,7 +488,8 @@ export default function Home() {
     setViewMode("form");
     setFormStatus("idle");
     setStatusMessage("Listo para investigar");
-    setIsWaitingResult(false);
+    setIsLoadingResult(false);
+    setBriefing(null);
     runTimestampRef.current = null;
   };
 
@@ -487,7 +499,8 @@ export default function Home() {
     const preparedForm = applySocialExtraction(formData);
     setFormData(preparedForm);
     setViewMode("results");
-    setIsWaitingResult(true);
+    setIsLoadingResult(true);
+    setBriefing(null);
     runTimestampRef.current = Date.now();
 
     setFormStatus("sending");
@@ -513,26 +526,18 @@ export default function Home() {
       setStatusMessage(
         error instanceof Error ? error.message : "Error inesperado"
       );
-      setIsWaitingResult(false);
+      setIsLoadingResult(false);
     }
   };
 
-  const ResultsPanel = ({
-    fullWidth = false,
-    report,
-    timestamp,
-  }: {
-    fullWidth?: boolean;
-    report: InvestigationReport | null;
-    timestamp?: string | null;
-  }) => {
+  const ResultsPanel = ({ fullWidth = false }: { fullWidth?: boolean }) => {
     const containerClass = [
       "glass-panel rounded-3xl border border-white/10 p-6 sm:p-7",
       fullWidth ? "w-full lg:mt-2" : "",
     ]
       .filter(Boolean)
       .join(" ");
-    const showLoader = viewMode === "results" && isWaitingResult;
+    const showLoader = viewMode === "results" && isLoadingResult;
 
     return (
       <section className={containerClass}>
@@ -549,27 +554,9 @@ export default function Home() {
         </div>
         <div className="mt-6 rounded-3xl border border-white/10 bg-black/20 p-5">
           {showLoader ? (
-            <div className="flex h-64 flex-col items-center justify-center gap-5 text-sm text-slate-400">
-              <span className="h-12 w-12 animate-spin rounded-full border-2 border-white/15 border-t-[var(--brand-cyan)]" />
-              <p>Procesando investigación…</p>
-            </div>
-          ) : report ? (
-            <div className="space-y-6">
-              {timestamp && (
-                <div className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-400">
-                  Última actualización —{" "}
-                  {dateFormatter.format(new Date(timestamp))}
-                </div>
-              )}
-              <InvestigationReportView report={report} />
-            </div>
+            <InvestigationLoading />
           ) : (
-            <div className="flex h-60 flex-col items-center justify-center gap-3 text-center text-sm text-slate-400">
-              <p>
-                Aún no hay reportes. Envía una investigación para ver los
-                hallazgos en este panel.
-              </p>
-            </div>
+            <BriefingResults data={briefing} />
           )}
         </div>
         {fullWidth && (
@@ -824,11 +811,7 @@ export default function Home() {
             </div>
           ) : (
             <div className="flex flex-col gap-6">
-              <ResultsPanel
-                fullWidth
-                report={currentReport}
-                timestamp={currentTimestamp}
-              />
+              <ResultsPanel fullWidth />
             </div>
           )}
 
@@ -897,12 +880,12 @@ export default function Home() {
                   ) : (
                     <>
                       <p className="mt-2 break-all font-mono text-xs text-white/80">
-                        {entryWebhook}
+                        {displayedEntryWebhook}
                       </p>
                       <div className="mt-3 flex flex-wrap gap-3">
                         <button
                           type="button"
-                          onClick={() => copyToClipboard(entryWebhook, "entrada")}
+                          onClick={() => copyToClipboard(displayedEntryWebhook, "entrada")}
                           className="text-xs font-semibold text-[var(--brand-cyan)]"
                         >
                           {copiedTarget === "entrada" ? "Copiado" : "Copiar URL"}
@@ -916,11 +899,11 @@ export default function Home() {
                     Salida (callback de esta UI)
                   </div>
                   <p className="mt-2 break-all font-mono text-xs text-white/80">
-                    {callbackPreview}
+                    {displayedCallbackUrl}
                   </p>
                   <button
                     type="button"
-                    onClick={() => copyToClipboard(callbackPreview, "salida")}
+                    onClick={() => copyToClipboard(displayedCallbackUrl, "salida")}
                     className="mt-3 text-xs font-semibold text-[var(--brand-cyan)]"
                   >
                     {copiedTarget === "salida" ? "Copiado" : "Copiar URL"}
