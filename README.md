@@ -57,10 +57,17 @@ El frontend transforma cada bloque en secciones visuales del panel “Resultados
    - Encabezado con el sujeto, partido, país y fecha del informe.  
    - Secciones: Perfil/biografía, cobertura mediática, opinión social, riesgos y oportunidades, narrativa y estrategia, datos faltantes.  
    - Animación “Investigando” mientras se espera la respuesta del agente.
+   - Renderizado virtualizado (react-window) + lazy sections para garantizar scroll fluido aun con informes extensos.
 3. **Historial de investigaciones**  
    - Lista de reportes previos con fecha y fuente, accesibles en un clic.
 4. **Panel interno (Modo Admin)**  
    - Estado del stream (Online/Offline), URLs configurables para el webhook de entrada y el callback de salida, botón de copia y edición mediante PIN `3333`.
+
+## Optimización y responsividad
+- **Virtualización**: listas extensas (noticias, temas, controversias, arquetipos) utilizan `react-window` para renderizar únicamente los elementos visibles, evitando saltos y pantallas negras.
+- **Carga perezosa**: cada bloque del informe se activa con `IntersectionObserver`, por lo que el DOM mantiene solo las secciones necesarias.
+- **Memoización y reducción de repaints**: uso de `React.memo`, `useMemo` y componentes ligeros para asegurar un rendimiento constante incluso con JSON pesados.
+- **Responsive completo**: diseño mobile-first que reorganiza las columnas en bloques verticales, elimina scroll horizontal y mantiene tipografías legibles desde teléfonos hasta monitores 4K.
 
 ## Configuración y variables de entorno
 Crear un archivo `.env.local` en el directorio `client/` con las variables necesarias:
